@@ -1,39 +1,35 @@
-package com.ekhtiyar.app
+package com.example.ekhtiyar
 
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 
 /**
  * موتور اصلی اسکنر اختیار معامله.
- * شامل دو حالت اسکن: Jump Scan و Dual Scan
- * منطق دقیقاً برگرفته از نسخه‌ی پایتون IranOptionsScreenerGUI است.
+ * منطق دقیقاً برگرفته از IranOptionsScreenerGUI.py
+ * نکته: نقشه‌ی بازار با کلید «نماد» ساخته می‌شود (مطابق market_map پایتون).
  */
 object Screener {
 
-    /** آیا این ردیف یک اختیار خرید است؟ */
-    private fun isCallOption(name: String, sym: String): Boolean {
-        val n = OptionParser.normFa(name)
-        val s = OptionParser.normFa(sym)
-        val byName = n.contains("اختیار") && n.contains("خرید")
-        val bySym = s.startsWith("ض") && s.any { it.isDigit() }
+    /** تشخیص اختیار خرید — مطابق خط ۴۷۵ پایتون */
+    private fun isOption(name: String, sym: String): Boolean {
+        val byName = name.contains("اختیار") && name.contains("خرید")
+        val bySym = sym.startsWith("ض") && sym.any { it.isDigit() }
         return byName || bySym
     }
 
-    /** پیدا کردن نماد پایه برای یک اختیار */
+    /** پیدا کردن نماد پایه — مطابق خطوط ۴۷۶ تا ۴۸۱ پایتون */
     private fun findBaseMatch(name: String, sym: String, targets: List<String>): String? {
-        val n = OptionParser.normFa(name)
         for (t in targets) {
-            if (n.contains(t)) return t
+            if (name.contains(t)) return t
         }
-        // فال‌بک: حذف حرف اول و رقم‌های انتهایی نماد
         if (sym.length > 1) {
             val cleanSym = sym.substring(1).replace(Regex("\\d+$"), "")
-            if (targets.contains(cleanSym)) return cleanSym
+            if (cleanSym in targets) return cleanSym
         }
         return null
     }
 
-    /** محاسبه‌ی روز مانده تا سررسید */
+    /** محاسبه‌ی روز مانده تا سررسید — مطابق خطوط ۴۹۲ تا ۴۹۸ */
     private fun computeDaysLeft(expiry: String, today: LocalDate): Int {
         if (expiry.isBlank()) return -1
         return try {
@@ -46,12 +42,12 @@ object Screener {
     }
 
     /**
-     * Jump Scan (فیلتر عمومی / سبک PMCC)
-     * @param market نقشه‌ی داده‌های بازار: کلید = insCode
-     * @param targets لیست نمادهای پایه‌ای که می‌خواهیم اسکن کنیم
-     * @param minP حداقل قیمت خریدار (پیش‌فرض 1.0)
-     * @param minMonthlyPct حداقل سود ماهانه درصدی (پیش‌فرض 4.0)
-     * @param prevApproved مجموعه‌ی نمادهای تاییدشده‌ی اسکن قبلی (برای علامت is_new)
+     * Jump Scan (فیلتر عمومی / PMCC) — مطابق _process_general_filter
+     * @param market نقشه‌ی بازار، کلید = نماد
+     * @param targets نمادهای پایه
+     * @param minP پیش‌فرض 1.0
+     * @param minMonthlyPct پیش‌فرض 4.0
+     * @param prevApproved نمادهای تاییدشده‌ی اسکن قبلی (برای is_new)
      */
     fun jumpScan(
         market: Map<String, MarketInstrument>,
@@ -64,28 +60,26 @@ object Screener {
 
         val rows = ArrayList<JumpRow>()
 
-        for (data in market.values) {
+        for ((sym, data) in market) {
             val name = data.name
-            val sym = data.code.let { OptionParser.normFa(data.symbol) }
-
-            if (!isCallOption(name, sym)) continue
+            if (!isOption(name, sym)) continue
 
             val baseMatch = findBaseMatch(name, sym, targets) ?: continue
 
-            // قیمت دارایی پایه: اول بهترین فروشنده، اگر صفر بود آخرین قیمت
-            val baseData = market.values.firstOrNull {
-                OptionParser.normFa(it.symbol) == baseMatch || OptionParser.normFa(it.name).contains(baseMatch)
-            }
+            // S = best_ask پایه، اگر صفر بود last_price
+            val baseData = market[baseMatch]
             var s = baseData?.bestAsk ?: 0.0
             if (s == 0.0) s = baseData?.lastPrice ?: 0.0
 
             val p = data.bestBid
             val v = data.bestVol
-            val k = OptionParser.parseStrike(name).toDouble()
+            val kNum = OptionParser.parseStrike(name)
+            val k = kNum.toInt()
+            val kD = kNum.toDouble()
             val expiry = OptionParser.parseExpiry(name)
             val daysLeft = computeDaysLeft(expiry, today)
 
-            val kp = k + p
+            val kp = kD + p
             val absPct = if (s > 0) ((kp / s - 1.0) * 100.0) else 0.0
             val safeDays = maxOf(1, daysLeft)
             val monthlyPct = if (daysLeft >= 0) (absPct / safeDays) * 30.0 else 0.0
@@ -93,11 +87,11 @@ object Screener {
             var ok = true
             var status = "✔ تایید"
             when {
-                k <= 0 || s <= 0 -> { ok = false; status = "دیتا ناقص" }
+                kD <= 0 || s <= 0 -> { ok = false; status = "دیتا ناقص" }
                 daysLeft < 0 -> { ok = false; status = "منقضی" }
                 p <= 0 -> { ok = false; status = "بدون خریدار (P=0)" }
                 p < minP -> { ok = false; status = "P کم" }
-                k >= s -> { ok = false; status = "OTM/ATM نیست" }
+                kD >= s -> { ok = false; status = "OTM/ATM نیست" }
                 monthlyPct < minMonthlyPct -> { ok = false; status = "سود کم (%.1f%%)".format(monthlyPct) }
             }
 
@@ -106,16 +100,16 @@ object Screener {
             rows.add(
                 JumpRow(
                     base = baseMatch,
-                    optionSym = sym,
+                    optionSymbol = sym,
                     expiry = expiry,
                     daysLeft = daysLeft,
-                    k = k,
-                    s = s,
-                    p = p,
-                    volP = v.toInt(),
-                    kp = kp,
-                    absPct = Math.round(absPct * 100.0) / 100.0,
-                    monthlyPct = Math.round(monthlyPct * 100.0) / 100.0,
+                    strike = k,
+                    underlyingPrice = s,
+                    bid = p,
+                    bidVolume = v.toInt(),
+                    kPlusP = kp,
+                    absoluteProfitPct = Math.round(absPct * 100.0) / 100.0,
+                    monthlyProfitPct = Math.round(monthlyPct * 100.0) / 100.0,
                     status = status,
                     ok = ok,
                     isNew = isNew
@@ -126,38 +120,28 @@ object Screener {
     }
 
     /**
-     * Dual Scan
-     * اختیارها را بر اساس (پایه + سررسید) گروه می‌کند و جفت‌های strike پایین/بالا را مقایسه می‌کند.
+     * Dual Scan — گروه‌بندی بر اساس (پایه + سررسید) و مقایسه‌ی جفت strike پایین/بالا.
+     * توجه: فرمول دقیق تیک سبز/زرد باید با _process_tick_profit پایتون نهایی شود.
      */
     fun dualScan(
         market: Map<String, MarketInstrument>,
         targets: List<String>
     ): List<DualRow> {
 
-        data class Opt(
-            val base: String,
-            val sym: String,
-            val expiry: String,
-            val strike: Double,
-            val bid: Double,
-            val ask: Double
-        )
+        val options = ArrayList<DualOption>()
 
-        val options = ArrayList<Opt>()
-
-        for (data in market.values) {
+        for ((sym, data) in market) {
             val name = data.name
-            val sym = OptionParser.normFa(data.symbol)
-            if (!isCallOption(name, sym)) continue
+            if (!isOption(name, sym)) continue
             val baseMatch = findBaseMatch(name, sym, targets) ?: continue
             val strike = OptionParser.parseStrike(name).toDouble()
             val expiry = OptionParser.parseExpiry(name)
             if (expiry.isBlank() || strike <= 0) continue
 
             options.add(
-                Opt(
+                DualOption(
                     base = baseMatch,
-                    sym = sym,
+                    symbol = sym,
                     expiry = expiry,
                     strike = strike,
                     bid = data.bestBid,
@@ -166,10 +150,9 @@ object Screener {
             )
         }
 
-        // گروه‌بندی بر اساس (پایه، سررسید)
         val grouped = options.groupBy { it.base to it.expiry }
-
         val results = ArrayList<DualRow>()
+
         for ((key, group) in grouped) {
             val (base, expiry) = key
             val sorted = group.sortedBy { it.strike }
@@ -182,24 +165,27 @@ object Screener {
                     val f1 = (low.strike + low.bid) - (high.strike + high.ask)
                     val f2 = (low.strike + low.ask) - (high.strike + high.bid)
 
-                    val highlight = when {
-                        f1 >= 0 -> "green"
-                        f2 < 0 -> "yellow"
-                        else -> "none"
+                    val tag = when {
+                        f1 >= 0 -> "tick_green"
+                        f2 < 0 -> "tick_yellow"
+                        else -> continue
                     }
-                    if (highlight == "none") continue
 
                     results.add(
                         DualRow(
                             base = base,
                             expiry = expiry,
-                            lowSym = low.sym,
-                            highSym = high.sym,
+                            lowSymbol = low.symbol,
+                            highSymbol = high.symbol,
                             lowStrike = low.strike,
                             highStrike = high.strike,
+                            lowBid = low.bid,
+                            lowAsk = low.ask,
+                            highBid = high.bid,
+                            highAsk = high.ask,
                             f1 = Math.round(f1 * 100.0) / 100.0,
                             f2 = Math.round(f2 * 100.0) / 100.0,
-                            highlight = highlight
+                            tag = tag
                         )
                     )
                 }
