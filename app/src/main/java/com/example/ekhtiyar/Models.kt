@@ -4,6 +4,7 @@ package com.example.ekhtiyar
 // منبع: market_map در فایل پایتون (سطرهای 112-121)
 data class MarketInstrument(
     val code: String,
+       val symbol: String,
     val name: String,
     val lastPrice: Double,
     val bestBid: Double,
